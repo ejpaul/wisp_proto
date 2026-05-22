@@ -1,6 +1,12 @@
 import numpy as np
 from numba import njit, prange
 
+
+# ---------------------------------------------------------------------------
+# Trotter-path pushers (unchanged from original core.py, kept here for the "trotter"
+# splitting branch). These take one full step in a single shot.
+# ---------------------------------------------------------------------------
+
 @njit(parallel=True)
 def push_particles_nonlinear_full_f(x, v, E_c, E_s, t, dt):
     """Advance particles with frozen field (E_c, E_s formulation)."""
@@ -15,6 +21,7 @@ def push_particles_nonlinear_full_f(x, v, E_c, E_s, t, dt):
         # Apply periodic boundary conditions
         x[i] = x[i] % (2 * np.pi)
     return x, v
+
 
 @njit(parallel=True)
 def push_particles_nonlinear_delta_f(x, v, w, E_c, E_s, t, dt, ub, vb):
@@ -48,6 +55,71 @@ def push_particles_linear(x, v, w, E_c, E_s, t, dt, ub, vb):
         x[i] = x[i] % (2 * np.pi)
     return x, v, w
 
+
+# ---------------------------------------------------------------------------
+# NEW: exact sub-operators for the Strang split.
+#
+# The idea here is different from the pushers above. We split the dynamics into three 
+# simple pieces, move the particles (X), kick the weights (W), and kick the field (F), 
+# and solve each little piece exactly over its sub-interval.
+# ---------------------------------------------------------------------------
+
+@njit(parallel=True)
+def position_push(x, v, ds):
+    """Exact position sub-operator F^(1): x_i -> (x_i + v_i * ds) mod 2pi.
+
+    Pure drift: every particle just coasts at its own velocity for a time ds.
+    Nothing else changes, so this one is genuinely exact with no tricks.
+    """
+    N = len(x)
+    for i in prange(N):
+        x[i] = (x[i] + v[i] * ds) % (2 * np.pi)
+    return x
+
+
+@njit(parallel=True)
+def weight_push_exact(x, v, w, E_c, E_s, t, ds, ub, vb):
+    """Exact weight sub-operator (delta-f analogue of F^(2)), frozen x, E_c, E_s.
+
+    With the positions held fixed, we work out the exact velocity kick a
+    particle picks up from the field over the time slice ds, then feed 
+    that kick into the delta-f weight equation. 
+    """
+    N = len(x)
+    sin_half = np.sin(ds / 2.0)
+    inv_vb2 = 1.0 / vb**2
+    for i in prange(N):
+        phase_mid = x[i] - t - ds / 2.0
+        vdot_impulse = -2.0 * sin_half * (E_c * np.cos(phase_mid) + E_s * np.sin(phase_mid))
+        w[i] = w[i] + vdot_impulse * 2.0 * (v[i] - ub) * inv_vb2
+    return w
+
+
+@njit(parallel=True)
+def field_update_exact(E_c, E_s, x, v, w, t, ds, nb_over_ne):
+    """Exact field sub-operator F^(3), frozen x, v, w.
+
+    Mirror image of the weight push: with the particles held fixed, we advance
+    the field by the exact contribution the current makes over the slice ds.
+    Same `2*sin(ds/2)` exact-integral factor, same midpoint phase. The sum over
+    particles is the (cos/sin) Fourier projection of the current j = sum(v*w).
+    """
+    N = len(x)
+    coeff = 2.0 * np.sin(ds / 2.0) * nb_over_ne / N
+    s_cos = 0.0
+    s_sin = 0.0
+    for i in prange(N):
+        phase_mid = x[i] - t - ds / 2.0
+        s_cos += v[i] * w[i] * np.cos(phase_mid)
+        s_sin += v[i] * w[i] * np.sin(phase_mid)
+    E_c_new = E_c + coeff * s_cos
+    E_s_new = E_s + coeff * s_sin
+    return E_c_new, E_s_new
+
+
+# ---------------------------------------------------------------------------
+# Current / field helpers
+# ---------------------------------------------------------------------------
 
 @njit(parallel=True)
 def compute_current_fourier(x, v, w, t, nb_over_ne):
@@ -92,8 +164,16 @@ def run_timestepping(sim_params):
     method = sim_params["method"]
     full_f = sim_params["full_f"]
 
-    x = np.random.uniform(0, 2 * np.pi, n_particles)
-    v = np.random.normal(ub, vb / np.sqrt(2), n_particles)
+    # NEW: seeded random number generator. Pass a "seed" in sim_params to get
+    # the exact same particle initialisation every run (handy for debugging and
+    # for reproducible results in the paper/git history). Leave it out (None)
+    # and you get a fresh random draw each time.
+    seed = sim_params.get("seed", None)
+    rng = np.random.default_rng(seed)
+
+    x = rng.uniform(0, 2 * np.pi, n_particles)
+    v = rng.normal(ub, vb / np.sqrt(2), n_particles)
+
     if full_f:
         w = np.ones(n_particles)
     else:
@@ -108,24 +188,33 @@ def run_timestepping(sim_params):
         t = time[n]
 
         if splitting_method == "strang":
-            # Step 1: Half step for field (particles at time t)
-            dE_c_dt, dE_s_dt = compute_current_fourier(x, v, w, t, nb_over_ne)
-            E_c = E_c + dE_c_dt * (dt / 2)
-            E_s = E_s + dE_s_dt * (dt / 2)
+            # NEW: proper three-operator Strang split built from the exact
+            # sub-operators above. The composition is a palindrome,
+            #     W_{dt/2} o F_{dt/2} o X_{dt} o F_{dt/2} o W_{dt/2}
+            # (read right-to-left, so the first thing that actually runs is the
+            # right-most W). Because the sequence is symmetric, the whole step
+            # is second-order accurate in dt. Compared to the old "half field /
+            # full push / half field" version, this also kicks the weights
+            # exactly and uses the exact sub-operators throughout, so it's a lot
+            # cleaner and more accurate.
 
-            # Step 2: Full step for particles
-            if method == "linear":
-                x, v, w = push_particles_linear(x, v, w, E_c, E_s, t, dt, ub, vb)
-            else:
-                if full_f:
-                    x, v = push_particles_nonlinear_full_f(x, v, E_c, E_s, t, dt)
-                else:
-                    x, v, w = push_particles_nonlinear_delta_f(x, v, w, E_c, E_s, t, dt, ub, vb)
+            # Step 1: half weight push over [t, t + dt/2]
+            w = weight_push_exact(x, v, w, E_c, E_s, t, dt / 2.0, ub, vb)
 
-            # Step 3: Half step for field (particles now at time t+dt)
-            dE_c_dt, dE_s_dt = compute_current_fourier(x, v, w, t + dt, nb_over_ne)
-            E_c = E_c + dE_c_dt * (dt / 2)
-            E_s = E_s + dE_s_dt * (dt / 2)
+            # Step 2: half field update over [t, t + dt/2]
+            E_c, E_s = field_update_exact(E_c, E_s, x, v, w, t, dt / 2.0, nb_over_ne)
+
+            # Step 3: full position push over [t, t + dt] (the drift in the middle)
+            x = position_push(x, v, dt)
+
+            # Step 4: half field update over [t + dt/2, t + dt]
+            E_c, E_s = field_update_exact(
+                E_c, E_s, x, v, w, t + dt / 2.0, dt / 2.0, nb_over_ne
+            )
+
+            # Step 5: half weight push over [t + dt/2, t + dt]
+            w = weight_push_exact(x, v, w, E_c, E_s, t + dt / 2.0, dt / 2.0, ub, vb)
+
         elif splitting_method == "trotter":
             # Step 1: full step for particles
             if method == "linear":
@@ -134,10 +223,16 @@ def run_timestepping(sim_params):
                 if full_f:
                     x, v = push_particles_nonlinear_full_f(x, v, E_c, E_s, t, dt)
                 else:
-                    x, v, w = push_particles_nonlinear_delta_f(x, v, w, E_c, E_s, t, dt, ub, vb)
+                    x, v, w = push_particles_nonlinear_delta_f(
+                        x, v, w, E_c, E_s, t, dt, ub, vb
+                    )
 
-            # Step 2: full step for field
-            dE_c_dt, dE_s_dt = compute_current_fourier(x, v, w, t, nb_over_ne)
+            # Step 2: full step for field.
+            # NOTE (changed vs core.py): the field is now evaluated at t + dt,
+            # i.e. *after* the particles have already moved to their new spots,
+            # rather than at t. Small change, but it lines the current up with
+            # where the particles actually are at the end of the step.
+            dE_c_dt, dE_s_dt = compute_current_fourier(x, v, w, t + dt, nb_over_ne)
             E_c = E_c + dE_c_dt * dt
             E_s = E_s + dE_s_dt * dt
 

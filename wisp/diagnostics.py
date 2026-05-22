@@ -56,3 +56,10 @@ def compute_gamma(sim_params):
     ub = sim_params["ub"]
     vb = sim_params["vb"]
     return -np.sqrt(np.pi) * nb_over_ne * np.exp(-(1 - ub) ** 2 / (vb**2)) * (1 - ub) / vb**3
+
+def fit_gamma(time, E_amp_hist, t_min, t_max, eps=1e-300):
+    mask = (time >= t_min) & (time <= t_max)
+    y = np.log(np.maximum(E_amp_hist[mask], eps))
+    t = time[mask]
+    coeffs = np.polyfit(t, y, 1)
+    return coeffs[0]
