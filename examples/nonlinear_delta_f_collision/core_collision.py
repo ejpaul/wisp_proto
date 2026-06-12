@@ -185,8 +185,7 @@ def run_timestepping(sim_params):
             # Step 5: half weight / velocity push over [t + dt/2, t + dt]
             if not full_f:
                 w = weight_push_exact(
-                    x, v, w, E_c, E_s, t + dt / 2.0, dt / 2.0, ub, vb, nonlinear
-                )
+                    x, v, w, E_c, E_s, t + dt / 2.0, dt / 2.0, ub, vb, beta, nonlinear)
             if nonlinear:
                 v = velocity_push_exact(x, v, E_c, E_s, t + dt / 2.0, dt / 2.0)
 
@@ -197,7 +196,7 @@ def run_timestepping(sim_params):
             #     W_{dt} o F_{dt} o X_{dt}
 
             if not full_f:
-                w = weight_push_exact(x, v, w, E_c, E_s, t, dt, ub, vb, beta,nonlinear)
+                w = weight_push_exact(x, v, w, E_c, E_s, t, dt, ub, vb, beta, nonlinear)
             if nonlinear:
                 v = velocity_push_exact(x, v, E_c, E_s, t, dt)
             E_c, E_s = field_update_exact(E_c, E_s, x, v, w, t, dt, nb_over_ne)
