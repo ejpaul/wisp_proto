@@ -42,7 +42,7 @@ def weight_push_exact(x, v, w, E_c, E_s, t, ds, ub, vb, beta, nonlinear=False):
         if nonlinear:
             w[i] = w[i] + (1.0 - w[i]) * dw - beta * w[i] * ds
         else:
-            w[i] = w[i] + dw
+            w[i] = w[i] + dw - beta * w[i] * ds
     return w
 
 
