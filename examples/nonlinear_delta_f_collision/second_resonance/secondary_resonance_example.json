@@ -1,0 +1,22 @@
+{
+  "n_particles": 20000,
+  "n_steps": 1000,
+  "dt": 0.1,
+  "ub": 1.1,
+  "vb": 0.1,
+  "nb_over_ne": 0.00003,
+  "method": "nonlinear",
+  "full_f": false,
+  "splitting_method": "strang",
+  "nu": 0.0,
+  "alpha": 0.0,
+  "beta": 0.0,
+  "seed": 42,
+  "show_progress": true,
+  "modes": [
+    {"name": "primary", "k": 1, "omega": 1.0, "coupling": 1.0,
+     "gamma_d": 0.001760533196867887, "E_c": 0.00001, "E_s": 0.0, "evolve": true},
+    {"name": "secondary", "k": 2, "omega": 2.02, "coupling": 1.0,
+     "gamma_d": 0.001760533196867887, "E_c": 0.000002, "E_s": 0.0, "evolve": false}
+  ]
+}
